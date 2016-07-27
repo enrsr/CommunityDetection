@@ -10,6 +10,7 @@ def import_tweets_information():
     Import the tweets information that will be used in the algorithm. The information are:
         Author of the tweet (user)
         Artist to which the tweet is related
+        Type of the tweet (Retweet, reply or conventional)
 
     :return: the tweets' important information
     :rtype: tuple
@@ -21,19 +22,21 @@ def import_tweets_information():
     tweets = pickle.load(open('Tweets Data - ' + str(n_data) + ' Tweets.p', 'rb'))
     tweets_user = []
     tweets_artist = []
+    tweets_type = []
 
     # Store the important information
     for tweet in tweets:
         # Store the tweets' user
         tweets_user.append(tweet['user'])
         tweets_artist.append(tweet['artist'])
+        tweets_type.append(tweet['type'])
 
     end = timer()
     print('Imported the tweets information in %.2f seconds.' % (end-start))
     txt_file.write('Imported the tweets information in %.2f seconds. \n' % (end-start))
 
     # Return the important information
-    return tweets_user, tweets_artist
+    return tweets_user, tweets_artist, tweets_type
 
 
 def map_user_to_int(tweets_user):
@@ -83,9 +86,7 @@ def number_words_in_vocabulary():
 
 def assign_topic_and_community(n_topics, n_communities):
     """
-    Assigns a topic and a community for each tweet. Build a LDA model and obtain the document topic distribution. Sample
-    a topic from each document topic distribution. Uses the document topic distribution to cluster the tweets. Each
-    cluster is related to a community.
+    Randomly assigns a topic and a community for each tweet.
 
     :return: the tweets' topics and communities
     :rtype: tuple
@@ -96,20 +97,12 @@ def assign_topic_and_community(n_topics, n_communities):
     # Load the files
     tfidf_matrix = pickle.load(open('TF-IDF Matrix - ' + str(n_data) + ' Tweets.p', 'rb'))
 
-    # Obtain the tweets' document topic distribution
-    tweets_topic_distribution = LDA(n_topics=n_topics,max_iter=10,batch_size=128).fit_transform(tfidf_matrix)
-
-    # Sample a topic for each tweet from its document topic distribution
+    # Sample a topic and a community randomly
     tweets_topic = []
+    tweets_community = []
     for tweet in range(n_tweets):
-        normalize_factor = sum(tweets_topic_distribution[tweet])
-        topic_distribution = tweets_topic_distribution[tweet]/normalize_factor
-        topic_assignment = np.random.multinomial(1, topic_distribution).argsort()[::-1][0]
-        tweets_topic.append(topic_assignment)
-
-    # Cluster the tweets by its document topic distribution and assign the cluster label as community
-    km = KMeans(n_clusters=n_communities, max_iter=300, n_init=10).fit(tweets_topic_distribution)
-    tweets_community = km.labels_
+        tweets_topic.append(np.random.randint(0, n_topics))
+        tweets_community.append(np.random.randint(0, n_communities))
 
     end = timer()
     print('Assigned a initial topic and community in %.2f seconds' %(end-start))
@@ -135,32 +128,53 @@ def markov_chain_convergence(n_iterations=1):
     term_document_matrix = pickle.load(open('Term Document Matrix - ' + str(n_data) + ' Tweets.p', 'rb'))
 
     s = timer()
-    # Build and compute the user-topic and user-topic-communities count
+
+    # Build and compute the count matrix
+    users_count = np.zeros(n_users, dtype=int)
     user_topics_count = np.zeros((n_users, n_topics), dtype=int)
     user_topic_communities_count = np.zeros((n_users, n_topics, n_communities), dtype=int)
-    users_count = np.zeros(n_users, dtype=int)
 
+    community_count = np.zeros(n_communities, dtype=int)
+    community_type_count = np.zeros((n_communities, n_types), dtype=int)
+
+    topic_word_count = np.zeros((n_topics, n_words), dtype=int)
+    topic_words_count = np.zeros(n_topics, dtype=int)
+
+    dense_term_document_matrix = term_document_matrix.todense().tolist()
     for index in range(n_tweets):
         user = tweets_user[index]
         topic = tweets_topic[index]
         community = tweets_community[index]
+        type = tweets_type[index]
 
+        users_count[user] += 1
         user_topics_count[user][topic] += 1
         user_topic_communities_count[user][topic][community] += 1
-        users_count[user] += 1
+
+        community_count[community] += 1
+        community_type_count[community][type] += 1
+
+        topic_word_count[topic] += dense_term_document_matrix[index]
+        topic_words_count[topic] += sum(dense_term_document_matrix[index])
 
     e = timer()
-    print('Built the user counts in %.2f seconds' % (e - s))
-    txt_file.write('Built the user counts in %.2f seconds. \n' % (e - s))
+    print('Built the count matrix in %.2f seconds' % (e - s))
+    txt_file.write('Built the count matrix in %.2f seconds. \n' % (e - s))
 
     for i in range(n_iterations):
         # For each tweet, obtain a topic and community assignment
 
         # Obtain the conditional probability distributions
-        for tweet, words_count in zip(range(n_tweets), term_document_matrix.todense().tolist()):
-            user = tweets_user[tweet]
+        for tweet_index, tweet_words_count in zip(range(n_tweets), term_document_matrix.todense().tolist()):
+            user = tweets_user[tweet_index]
+            type = tweets_type[tweet_index]
+            Np = sum(tweet_words_count)
+
             p_z = []    # Store p(z_p=z|u_p=u) for all z
             p_c = []    # Store p(c_p=c|u_p=u, z_p=z) for all z and c
+            p_x = []    # Store p(x_p=x|c_p=c) for all c
+            p_w = []    # Store p(W_p=W|z_p=z) for all z
+
             for topic in range(n_topics):
                 # Obtain the conditional probability p(z_p=z|u_p=u)
                 n_z = user_topics_count[user][topic] - 1
@@ -169,31 +183,62 @@ def markov_chain_convergence(n_iterations=1):
 
                 p_c.append([])
                 for community in range(n_communities):
-                    # Obtain the conditional probability p(c_p=c|u_o=u, z_p=z) for all z and c
+                    # Obtain the conditional probability p(c_p=c|u_p=u, z_p=z) for all z and c
+                    # and the conditional probability p(x_p=x|c_p=c)
                     n_c = user_topic_communities_count[user][topic][community] - 1
                     N_c = user_topics_count[user][topic] - 1
                     p_c[topic].append((n_c + n_users*n_topics)/(N_c + n_users*n_topics*n_communities))
+
+                    if topic == 0:
+                        n_x = community_type_count[community][type] - 1
+                        N_x = community_count[community] - 1
+                        p_x.append((n_x + n_communities)/(N_x + n_communities*n_types))
+
+                p = 1
+                den_index = 0
+                for word_index, word_count in enumerate(tweet_words_count):
+                    if word_count > 0:
+                        for index in range(word_count):
+                            num = topic_word_count[topic][word_index] - 1 + index + n_topics
+                            den = topic_words_count[topic] - Np + n_words*den_index + n_words*n_words*n_topics
+                            den_index += 1
+                            p*= num/den
+                p_w.append(p)
+
 
             # Obtain the joint probability distribution
             p = []  # Store p(z_p=z, c_p=c, W_p=W)
             for topic in range(n_topics):
                 for community in range(n_communities):
-                    p.append(p_z[topic]*p_c[topic][community])
+                    p.append(p_z[topic]*p_c[topic][community]*p_x[community]*p_w[topic])
 
-            # Sample a topic and community assignment and update the user-topic-communities count
-            old_topic = tweets_topic[tweet]
-            old_community = tweets_community[tweet]
+            # Update the count matrix
+            old_topic = tweets_topic[tweet_index]
+            old_community = tweets_community[tweet_index]
+
             user_topics_count[user][old_topic] -= 1
             user_topic_communities_count[user][old_topic][old_community] -= 1
+            community_count[old_community] -= 1
+            community_type_count[old_community][type] -= 1
+            topic_word_count[old_topic] -= tweet_words_count
+            topic_words_count[old_topic] -= Np
 
+            # Sample a topic and community assignment
             assignment = np.random.multinomial(1, p).argsort()[::-1][0]
             topic_assignment = int(math.floor(assignment/n_communities))
             community_assignment = assignment - topic_assignment*n_communities
+
+            # Update the count matrix
             user_topics_count[user][topic_assignment] += 1
             user_topic_communities_count[user][topic_assignment][community_assignment] += 1
+            community_count[community_assignment] += 1
+            community_type_count[community_assignment][type] += 1
+            topic_word_count[topic_assignment] += tweet_words_count
+            topic_words_count[topic_assignment] += Np
 
-            tweets_topic[tweet] = topic_assignment
-            tweets_community[tweet] = community_assignment
+            # Assign a new topic and community for the tweet
+            tweets_topic[tweet_index] = topic_assignment
+            tweets_community[tweet_index] = community_assignment
 
     # Save the result of the tweets' topic and community assignment
     pickle.dump(tweets_topic, open('Topics Assignment - ' + str(n_data) + ' Tweets.p', 'wb'))
@@ -239,7 +284,6 @@ def obtain_community_distributions():
     community_topic_distribution = []
     community_user_distribution = []
     for community in range(n_communities):
-        s = timer()
         # Obtain the community topic distribution p(z_p=z|c_p=c)
         community_topic_distribution.append([])
         for topic in range(n_topics):
@@ -251,9 +295,8 @@ def obtain_community_distributions():
         community_user_distribution.append([])
         for user in set(tweets_user):
             n_u = max(community_users_count[community][user] - 1, 0)
-            N_u = max(communities_count[community] - 1, 0)
+            N_u = max(communities_count[community] - 1, 0.1)
             community_user_distribution[community].append(n_u/N_u)
-        e = timer()
     end = timer()
     print('Obtained the community distributions in %.2f seconds' % (end-start))
     txt_file.write('Obtained the community distributions in %.2f seconds. \n' % (end-start))
@@ -275,24 +318,17 @@ def print_community_distributions(community_topic_distribution, community_user_d
 
     for community in range(n_communities):
         # Print the most relevant topics in each community
-        print('Community %d most relevant topics: ' % community, end='')
         txt_file.write('Community %d most relevant topics: ' % community)
         ordered_topic_distribution = np.asarray(community_topic_distribution[community]).argsort()[::-1]
         for topic in ordered_topic_distribution[:n_relevant_topics]:
-            print(topic, end=', ')
             txt_file.write('%d, ' % topic)
-        print()
         txt_file.write('\n')
 
         # Print the most relevant users in each community
-        print('Community %d most relevant users: ' % community, end='')
         txt_file.write('Community %d most relevant users: ' % community)
         ordered_user_distribution = np.asarray(community_user_distribution[community]).argsort()[::-1]
         for user in ordered_user_distribution[:n_relevant_users]:
-            print(user, end=', ')
             txt_file.write('%d, ' % user)
-        print()
-        print()
         txt_file.write('\n\n')
 
 
@@ -365,24 +401,17 @@ def print_user_distributions(user_topic_distribution, user_community_distributio
 
     for user in range(n_users):
         # Print the most relevant topics for each user
-        print('User %d most relevant topics: ' % user, end='')
         txt_file.write('User %d most relevant topics: ' % user)
         ordered_topic_distribution = np.asarray(user_topic_distribution[user]).argsort()[::-1]
         for topic in ordered_topic_distribution[:n_relevant_topics]:
-            print(topic, end=', ')
             txt_file.write('%d, ' % topic)
-        print()
         txt_file.write('\n')
 
         # Print the most relevant communities for each user
-        print('User %d most relevant communities: ' % user, end='')
         txt_file.write('User %d most relevant communities: ' % user)
         ordered_community_distribution = np.asarray(user_community_distribution[user]).argsort()[::-1]
         for community in ordered_community_distribution[:n_relevant_communities]:
-            print(community, end=', ')
             txt_file.write('%d, ' % community)
-        print()
-        print()
         txt_file.write('\n\n')
 
 
@@ -390,10 +419,10 @@ def print_user_distributions(user_topic_distribution, user_community_distributio
 all_start = timer()
 
 # Define the parameters
-n_data = 1000
-n_topics = 4
-n_communities = 5
-n_iterations = 50
+n_data = 10000
+n_topics = 3
+n_communities = 3
+n_iterations = 100
 n_relevant_topics = min(10, n_topics)
 n_relevant_users = 10
 n_relevant_communities = min(10, n_communities)
@@ -405,7 +434,7 @@ txt_file = open('Community Detection Output - ' + str(n_data) + ' Tweets, ' + st
 # Step 0: Pre Processing - Obtaining useful values
 
 # Import the tweets important information
-tweets_user, tweets_artist = import_tweets_information()
+tweets_user, tweets_artist, tweets_type = import_tweets_information()
 
 # Map the tweets' user to integers
 tweets_user = map_user_to_int(tweets_user=tweets_user)
@@ -413,9 +442,11 @@ tweets_user = map_user_to_int(tweets_user=tweets_user)
 # Obtain the number of tweets, the number of users and the number of words in the vocabulary
 n_tweets = len(tweets_user)
 n_users = len(set(tweets_user))
+n_types = len(set(tweets_type))
 if n_users < n_relevant_users:
     n_relevant_users = n_users
 n_words = number_words_in_vocabulary()
+
 
 # Step 1: Initialization - assign a topic and a community for each tweet
 tweets_topic, tweets_community = assign_topic_and_community(n_topics=n_topics, n_communities=n_communities)

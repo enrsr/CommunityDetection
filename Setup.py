@@ -43,6 +43,12 @@ def import_tweets_from_mongoDB(n_tweets):
         tweet = {}
         tweet['id'] = str(document['_id'])
         tweet['text'] = document['text']
+        if tweet['text'].startswith('RT'):
+            tweet['type'] = 0       # Retweet
+        elif tweet['text'].startswith('@'):
+            tweet['type'] = 1       # Reply
+        else:
+            tweet['type'] = 2       # Conventional
         tweet['artist'] = document['handle']
         tweet['user'] = str(document['author_id'])
         tweet['date'] = document['created_at_datetime'].date()
